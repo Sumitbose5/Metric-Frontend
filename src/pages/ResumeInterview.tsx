@@ -38,6 +38,127 @@ export default function ResumeInterview() {
     const [isOutOfAttemptsModalOpen, setIsOutOfAttemptsModalOpen] = useState(false);
     const [externalEndRequested, setExternalEndRequested] = useState(false);
     const endButtonRef = useRef<HTMLButtonElement | null>(null);
+    const [isReconnecting, setIsReconnecting] = useState(false);
+    const [reconnectAttempt, setReconnectAttempt] = useState(0);
+    // For reconnect logic
+    const lastStartPayloadRef = useRef<{ assistantId: string; variableValues: any } | null>(null);
+    const reconnectAttemptsRef = useRef(0);
+    const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const MAX_RECONNECT_ATTEMPTS = 5;
+    const RECONNECT_BASE_DELAY_MS = 1000;
+    const isReconnectingRef = useRef(false);
+    const callEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    // VAPI handler setup factored out so reconnect attempts can reuse it
+    const setupVapiHandlers = (instance: Vapi) => {
+        instance.on("call-start", () => setIsInterviewing(true));
+
+        instance.on("call-end", () => {
+            // Ignore call-end if session was manually stopped
+            if (!lastStartPayloadRef.current) {
+                console.info('Ignoring call-end because session stopped');
+                return;
+            }
+
+            // debounce showing the external-end prompt. If an error occurs
+            // immediately after, we'll cancel this timer and attempt reconnect.
+            if (callEndTimerRef.current) clearTimeout(callEndTimerRef.current);
+            callEndTimerRef.current = setTimeout(() => {
+                // only set the prompt if we're not currently reconnecting
+                if (!isReconnectingRef.current) {
+                    setExternalEndRequested(true);
+                    setIsSpeaking(false);
+                    setIsUserSpeaking(false);
+                }
+            }, 500);
+        });
+
+        instance.on("speech-start", () => setIsSpeaking(true));
+        instance.on("speech-end", () => setIsSpeaking(false));
+
+        instance.on("message", (msg: any) => {
+            if (msg.type === "transcript") {
+                if (msg.role === "user") {
+                    setIsUserSpeaking(true);
+                    if (userSpeakingTimeoutRef.current) clearTimeout(userSpeakingTimeoutRef.current);
+                    if (msg.transcriptType === "final") {
+                        addMessage({ role: "user", text: msg.transcript });
+                        userSpeakingTimeoutRef.current = setTimeout(() => setIsUserSpeaking(false), 800);
+                    }
+                } else if (msg.role === "assistant" && msg.transcriptType === "final") {
+                    addMessage({ role: "assistant", text: msg.transcript });
+                }
+            }
+        });
+
+        instance.on("error", (error: any) => {
+            console.error("Vapi error:", error);
+            // cancel any pending call-end prompt (transient disconnects)
+            if (callEndTimerRef.current) {
+                clearTimeout(callEndTimerRef.current);
+                callEndTimerRef.current = null;
+            }
+            // mark reconnecting and attempt reconnect
+            isReconnectingRef.current = true;
+            scheduleReconnect();
+        });
+    };
+
+    const clearReconnectTimer = () => {
+        if (reconnectTimerRef.current) {
+            clearTimeout(reconnectTimerRef.current);
+            reconnectTimerRef.current = null;
+        }
+    reconnectAttemptsRef.current = 0;
+    isReconnectingRef.current = false;
+    setIsReconnecting(false);
+    setReconnectAttempt(0);
+        if (callEndTimerRef.current) {
+            clearTimeout(callEndTimerRef.current);
+            callEndTimerRef.current = null;
+        }
+    };
+
+    const startVapi = async (assistantId: string, variableValues: any) => {
+        // create new instance and wire handlers
+        vapiRef.current = new Vapi(VAPI_KEY);
+        setupVapiHandlers(vapiRef.current);
+        await vapiRef.current.start(assistantId, { variableValues });
+        // successful start: reset reconnect state
+        clearReconnectTimer();
+    };
+
+    const scheduleReconnect = () => {
+        // guard: only if we have a previous payload
+        if (!lastStartPayloadRef.current) return;
+        isReconnectingRef.current = true;
+        setIsReconnecting(true);
+        if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
+            toast.error('Connection lost. Please refresh the page or end the interview.');
+            setIsInterviewing(false);
+            isReconnectingRef.current = false;
+            setIsReconnecting(false);
+            return;
+        }
+
+        reconnectAttemptsRef.current += 1;
+        const attempts = reconnectAttemptsRef.current;
+        setReconnectAttempt(attempts);
+        const delay = RECONNECT_BASE_DELAY_MS * Math.pow(2, attempts - 1);
+        console.info(`Scheduling reconnect attempt ${attempts} in ${delay}ms`);
+
+        if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = setTimeout(async () => {
+            try {
+                const payload = lastStartPayloadRef.current!;
+                await startVapi(payload.assistantId, payload.variableValues);
+                // successful reconnect will call clearReconnectTimer which clears isReconnectingRef
+            } catch (err) {
+                console.error('Reconnect attempt failed', err);
+                scheduleReconnect();
+            }
+        }, delay);
+    };
 
     const addMessage = (message: Message) => {
         const updated = [...messagesRef.current, message];
@@ -76,59 +197,20 @@ export default function ResumeInterview() {
             setApiUserName(userName || user.firstName || 'User');
             updateInterviewId(interviewId);
 
-            vapiRef.current = new Vapi(VAPI_KEY);
             messagesRef.current = [];
             setMessages([]);
 
-            vapiRef.current.on("call-start", () => setIsInterviewing(true));
-            // When Vapi signals call-end from the server/assistant side,
-            // don't automatically finish the flow (which triggers API calls).
-            // Instead, mark that an external end was requested and prompt
-            // the candidate to press the END INTERVIEW button.
-            vapiRef.current.on("call-end", () => {
-                setExternalEndRequested(true);
-                // keep isInterviewing true so UI indicates a session is still active
-                setIsSpeaking(false);
-                setIsUserSpeaking(false);
-            });
-
-            // Assistant Speaking States
-            vapiRef.current.on("speech-start", () => setIsSpeaking(true));
-            vapiRef.current.on("speech-end", () => setIsSpeaking(false));
-
-            vapiRef.current.on("message", (msg: any) => {
-                if (msg.type === "transcript") {
-                    if (msg.role === "user") {
-                        setIsUserSpeaking(true);
-
-                        // Clear existing timeout when user is still talking
-                        if (userSpeakingTimeoutRef.current) clearTimeout(userSpeakingTimeoutRef.current);
-
-                        // If it's the final transcript, turn off glow after a short delay
-                        if (msg.transcriptType === "final") {
-                            addMessage({ role: "user", text: msg.transcript });
-                            userSpeakingTimeoutRef.current = setTimeout(() => {
-                                setIsUserSpeaking(false);
-                            }, 800);
-                        }
-                    } else if (msg.role === "assistant" && msg.transcriptType === "final") {
-                        addMessage({ role: "assistant", text: msg.transcript });
-                    }
-                }
-            });
-
-            vapiRef.current.on("error", (error: any) => {
-                console.error("Vapi error:", error);
-                setIsInterviewing(false);
-                setIsUserSpeaking(false);
-            });
-
-            await vapiRef.current.start(VAPI_ASSISTANT_ID, {
-                variableValues: { 
+            // store the last start payload so reconnects can reuse it
+            lastStartPayloadRef.current = {
+                assistantId: VAPI_ASSISTANT_ID,
+                variableValues: {
                     resume: JSON.stringify(resumeContext),
-                    role: role || targetRole
+                    role: role || targetRole,
                 },
-            });
+            };
+
+            // start Vapi using the helper which wires handlers and resets reconnect state
+            await startVapi(lastStartPayloadRef.current.assistantId, lastStartPayloadRef.current.variableValues);
 
         } catch (error) {
             console.error('Error:', error);
@@ -150,7 +232,13 @@ export default function ResumeInterview() {
     }, [externalEndRequested]);
 
     const stopInterview = async () => {
-        if (vapiRef.current) vapiRef.current.stop();
+        if (vapiRef.current) {
+            try { vapiRef.current.stop(); } catch (e) { /* ignore */ }
+            vapiRef.current = null;
+        }
+        // prevent any pending reconnects after manual stop
+        clearReconnectTimer();
+        lastStartPayloadRef.current = null;
         setIsInterviewing(false);
         setIsSpeaking(false);
         setIsUserSpeaking(false);
@@ -217,6 +305,13 @@ export default function ResumeInterview() {
                     <span className="px-4 py-1.5 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs font-bold rounded-full tracking-widest uppercase">Behavioral Interview</span>
                 </div>
             </header>
+
+            {isReconnecting && (
+                <div className="w-full bg-yellow-600/10 border-t border-yellow-500/20 text-yellow-300 text-sm py-2 flex items-center justify-center gap-3">
+                    <Loader2 className="w-4 h-4 animate-spin text-yellow-300" />
+                    <span>Reconnecting... (attempt {reconnectAttempt}/{MAX_RECONNECT_ATTEMPTS})</span>
+                </div>
+            )}
 
             <main className="flex-1 flex flex-col px-8 py-6 max-w-7xl mx-auto w-full h-full min-h-0">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6 flex-1 min-h-0 mb-6">
