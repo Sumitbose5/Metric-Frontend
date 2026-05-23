@@ -120,9 +120,9 @@ export function ServerHealthCheck({ children }: { children: React.ReactNode }) {
                 <p className="text-xs text-muted-foreground">
                   Please wait while we initialize...
                 </p>
-                <p className="text-xs text-muted-foreground mt-4">
+                {/* <p className="text-xs text-muted-foreground mt-4">
                   Attempt: {retryCount + 1}
-                </p>
+                </p> */}
               </div>
             </div>
           </div>
