@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -7,7 +7,13 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { Code2, Zap, Trophy } from 'lucide-react';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
+import { Code2, Zap, Trophy, Lock } from 'lucide-react';
 
 interface DsaLevelModalProps {
   isOpen: boolean;
@@ -73,35 +79,60 @@ export function DsaLevelModal({ isOpen, onClose, onStartInterview }: DsaLevelMod
         </DialogHeader>
 
         <div className="grid gap-4 py-4">
-          {levels.map((level) => {
-            const Icon = level.icon;
-            const isSelected = selectedLevel === level.id;
+          <TooltipProvider>
+            {levels.map((level) => {
+              const Icon = level.icon;
+              const isSelected = selectedLevel === level.id;
+              const isDisabled = level.id !== 'beginner';
 
-            return (
-              <button
-                key={level.id}
-                onClick={() => setSelectedLevel(level.id)}
-                className={`relative flex items-start gap-4 p-4 rounded-lg border-2 transition-all text-left ${
-                  isSelected
-                    ? `${level.borderColor} ${level.bgColor}`
-                    : 'border-border bg-card hover:border-accent/30'
-                }`}
-              >
-                <div className={`p-3 rounded-lg ${level.bgColor}`}>
-                  <Icon className={`w-6 h-6 ${level.color}`} />
-                </div>
-                <div className="flex-1">
-                  <h3 className="font-bold text-lg mb-1">{level.title}</h3>
-                  <p className="text-sm text-muted-foreground">{level.description}</p>
-                </div>
-                {isSelected && (
-                  <div className={`absolute top-4 right-4 w-5 h-5 rounded-full ${level.bgColor} border-2 ${level.borderColor} flex items-center justify-center`}>
-                    <div className={`w-2.5 h-2.5 rounded-full ${level.color.replace('text-', 'bg-')}`} />
+              const buttonContent = (
+                <button
+                  key={level.id}
+                  onClick={() => !isDisabled && setSelectedLevel(level.id)}
+                  disabled={isDisabled}
+                  className={`relative flex items-start gap-4 p-4 rounded-lg border-2 transition-all text-left ${
+                    isDisabled
+                      ? 'border-border bg-card/50 opacity-50 cursor-not-allowed'
+                      : isSelected
+                      ? `${level.borderColor} ${level.bgColor}`
+                      : 'border-border bg-card hover:border-accent/30 cursor-pointer'
+                  }`}
+                >
+                  <div className={`p-3 rounded-lg ${level.bgColor}`}>
+                    {isDisabled ? (
+                      <Lock className="w-6 h-6 text-muted-foreground" />
+                    ) : (
+                      <Icon className={`w-6 h-6 ${level.color}`} />
+                    )}
                   </div>
-                )}
-              </button>
-            );
-          })}
+                  <div className="flex-1">
+                    <h3 className="font-bold text-lg mb-1">{level.title}</h3>
+                    <p className="text-sm text-muted-foreground">{level.description}</p>
+                  </div>
+                  {isSelected && !isDisabled && (
+                    <div className={`absolute top-4 right-4 w-5 h-5 rounded-full ${level.bgColor} border-2 ${level.borderColor} flex items-center justify-center`}>
+                      <div className={`w-2.5 h-2.5 rounded-full ${level.color.replace('text-', 'bg-')}`} />
+                    </div>
+                  )}
+                </button>
+              );
+
+              if (isDisabled) {
+                return (
+                  <Tooltip key={level.id}>
+                    <TooltipTrigger asChild>
+                      {buttonContent}
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>Questions coming soon</p>
+                    </TooltipContent>
+                  </Tooltip>
+                );
+              }
+
+              return buttonContent;
+            })}
+          </TooltipProvider>
         </div>
 
         <div className="flex gap-3 justify-end">
@@ -111,7 +142,7 @@ export function DsaLevelModal({ isOpen, onClose, onStartInterview }: DsaLevelMod
           <Button
             onClick={handleStartInterview}
             disabled={!selectedLevel || isSubmitting}
-            className="min-w-[140px]"
+            className="min-w-35"
           >
             {isSubmitting ? 'Proceeding...' : 'Proceed'}
           </Button>
